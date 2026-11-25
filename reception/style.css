@@ -49,6 +49,8 @@ td { overflow-wrap: anywhere; }
 td:first-child, td:last-child { min-width: 5rem; }
 .empty { text-align: center; padding: 1rem; color: #486062; }
 .count { margin-left: .6rem; color: #486062; font-size: .9rem; font-weight: normal; }
+.order-controls { display: grid; grid-template-columns: minmax(12rem, 2fr) minmax(12rem, 1fr); gap: .75rem; margin-bottom: .75rem; }
+.revision-history { min-width: 13rem; white-space: pre-wrap; }
 summary { cursor: pointer; }
 dl { display: grid; grid-template-columns: max-content minmax(6rem, 1fr); gap: .15rem .65rem; margin: .5rem 0 0; }
 dd { margin: 0; white-space: pre-wrap; }
@@ -58,5 +60,6 @@ dd { margin: 0; white-space: pre-wrap; }
 }
 @media (max-width: 460px) {
   #fields { grid-template-columns: 1fr; }
+  .order-controls { grid-template-columns: 1fr; }
   #csv-types { columns: 1; }
 }

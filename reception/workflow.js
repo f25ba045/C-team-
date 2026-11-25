@@ -4,14 +4,14 @@
   // 両部署の取り込み・書き出しで共通のCSV仕様。
   const interfaces = {
     order:       { name: '製造依頼', from: 'sales', fields: 'requestId orderId product paper quantity dueDate' },
-    change:      { name: '注文変更依頼', from: 'sales', fields: 'requestId orderId paper quantity dueDate reason' },
+    change:      { name: '注文変更依頼', from: 'sales', fields: 'requestId orderId product paper quantity dueDate reason' },
     cancel:      { name: 'キャンセル依頼', from: 'sales', fields: 'requestId orderId reason' },
     proofReply:  { name: '校正回答', from: 'sales', fields: 'orderId proofId proofDecision comment' },
     additional:  { name: '追加製造依頼', from: 'sales', fields: 'requestId orderId quantity dueDate reason' },
     reply:       { name: '依頼回答', from: 'factory', fields: 'requestId orderId decision confirmedDueDate reason' },
     proof:       { name: '校正確認依頼', from: 'factory', fields: 'orderId proofId version instruction responseDueDate' },
     progress:    { name: '製造進捗通知', from: 'factory', fields: 'orderId stage updatedAt expectedDate' },
-    delay:       { name: '納期遅延通知', from: 'factory', fields: 'orderId reason expectedDate' },
+    delay:       { name: '納期遅延通知', from: 'factory', fields: 'orderId reason expectedDate dueDate' },
     finish:      { name: '製造完了報告', from: 'factory', fields: 'orderId requestId completedDate goodQuantity shortageQuantity' }
   };
   for (const definition of Object.values(interfaces)) {
@@ -37,7 +37,9 @@
     for (const field of definition.fields) {
       const value = event[field];
       requireThat(typeof value === 'string', field + ' がありません。');
-      if (!optionalFields.includes(field)) {
+      if (!optionalFields.includes(field) &&
+          !(event.type === 'delay' && field === 'dueDate') &&
+          !(event.type === 'change' && field === 'product')) {
         requireThat(value.trim(), field + ' は必須です。');
       }
       if (positiveFields.includes(field) || countFields.includes(field)) {
@@ -118,6 +120,7 @@
       }
       if (approved && request.type === 'change') {
         requireThat(!order.initialFinished, '当初分の製造完了後は注文変更を承認できません。');
+        if (request.product) order.product = request.product;
         order.paper = request.paper;
         order.quantity = Number(request.quantity);
         state.requests.get(order.originalRequestId).targetQuantity = order.quantity;
@@ -168,6 +171,7 @@
       case 'delay':
         order.delayReason = event.reason;
         order.expectedDate = event.expectedDate;
+        if (event.dueDate) order.dueDate = event.dueDate;
         break;
       case 'finish':
         requireThat(request && request.orderId === order.id && ['order', 'additional'].includes(request.type) &&
@@ -221,10 +225,21 @@
     return ['eventId', 'type', ...interfaces[event.type].fields].map(field => event[field]);
   }
 
+  function normalizeLegacyEvent(event) {
+    if (event.type === 'delay' && !Object.hasOwn(event, 'dueDate')) {
+      return { ...event, dueDate: '' };
+    }
+    if (event.type === 'change' && !Object.hasOwn(event, 'product')) {
+      return { ...event, product: '' };
+    }
+    return event;
+  }
+
   function buildState(events) {
     let state = { orders: new Map(), requests: new Map(), proofs: new Map() };
     const seen = new Map();
-    for (const event of events) {
+    for (const source of events) {
+      const event = normalizeLegacyEvent(source);
       requireThat(!seen.has(event.eventId), '台帳内でイベントIDが重複しています。');
       applyEvent(state, event, true);
       seen.set(event.eventId, event);
@@ -254,7 +269,8 @@
     const state = buildState(current);
     const accepted = [];
     let skipped = 0;
-    for (const [index, event] of incoming.entries()) {
+    for (const [index, source] of incoming.entries()) {
+      const event = normalizeLegacyEvent(source);
       try {
         validateEvent(event);
         const old = state.seen.get(event.eventId);
@@ -367,7 +383,7 @@
     requireThat(JSON.stringify(header) === '["department","event"]', '台帳保存用のCSVを選んでください。');
     const events = rows.map(row => {
       requireThat(row.length === 2 && row[0] === department, '自部署で保存した台帳を選んでください。');
-      return JSON.parse(row[1]);
+      return normalizeLegacyEvent(JSON.parse(row[1]));
     });
     buildState(events);
     return events;

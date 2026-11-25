@@ -56,6 +56,18 @@
 
     <section aria-labelledby="orders-title">
       <h2 id="orders-title">注文一覧 <span id="order-count" class="count"></span></h2>
+      <div class="order-controls">
+        <label>注文を検索
+          <input id="order-search" type="search" placeholder="注文ID・品名・用紙など">
+        </label>
+        <label>表示条件
+          <select id="order-filter">
+            <option value="all">すべて</option>
+            <option value="unfinished">未完了のみ</option>
+            <option value="approval">製造承認待ちのみ</option>
+          </select>
+        </label>
+      </div>
       <div class="table-wrap">
         <table aria-labelledby="orders-title">
           <thead><tr><th scope="col">注文ID</th><th scope="col">品名</th><th scope="col">用紙</th><th scope="col">部数</th><th scope="col">納期</th><th scope="col">状態</th><th scope="col">校正</th><th scope="col">完了見込み</th><th scope="col">遅延理由</th><th scope="col">良品累計</th><th scope="col">再依頼</th></tr></thead>
