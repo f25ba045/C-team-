@@ -18,6 +18,10 @@
   };
   let events = [];
   let state = workflow.buildState(events);
+  const orderRows = new Map();
+  const historyRows = new Map();
+  let orderEmptyRow;
+  let historyEmptyRow;
 
   function element(tag, content) {
     const item = document.createElement(tag);
@@ -75,8 +79,9 @@
   }
 
   function proofChoices(order) {
-    return [...state.proofs.values()].filter(proof => order && proof.orderId === order.id && !proof.answer)
-      .map(proof => [proof.proofId, '第' + proof.version + '版 · ' + proof.instruction]);
+    const proof = [...state.proofs.values()].reverse()
+      .find(item => order && item.orderId === order.id && !item.answer);
+    return proof ? [[proof.proofId, '第' + proof.version + '版 · ' + proof.instruction]] : [];
   }
 
   function automaticField(type, field) {
@@ -106,9 +111,10 @@
       const last = [...state.proofs.values()].filter(proof => order && proof.orderId === order.id).at(-1);
       input.value = last ? Number(last.version) + 1 : 1;
     }
-    if (type === 'change' && order && ['paper', 'quantity', 'dueDate'].includes(field)) {
+    if (type === 'change' && order && ['product', 'paper', 'quantity', 'dueDate'].includes(field)) {
       input.value = order[field];
     }
+    if (type === 'delay' && order && field === 'dueDate') input.value = order.dueDate;
     return input;
   }
 
@@ -124,13 +130,16 @@
       const label = element('label');
       const input = inputFor(type, field, order);
       input.required = !['comment', 'confirmedDueDate'].includes(field) &&
+        !(field === 'dueDate' && type === 'delay') &&
         !(field === 'reason' && type === 'reply');
       if (field === 'orderId' && selectedOrder) input.value = selectedOrder;
       if (field === 'orderId') input.addEventListener('change', () => {
         renderForm(input.value);
         formFields.querySelector('[name="orderId"]').focus();
       });
-      label.append(element('span', fields[field][0] + (input.required ? ' *' : '')), input);
+      const fieldLabel = field === 'dueDate' && type === 'delay'
+        ? '確定納期（変更する場合）' : fields[field][0];
+      label.append(element('span', fieldLabel + (input.required ? ' *' : '')), input);
       formFields.append(label);
     }
     $('action-help').textContent = type === 'order' ? '注文IDと依頼IDは自動で発行します。' :
@@ -162,61 +171,135 @@
     return order.progress || '製造承認済み';
   }
 
-  function rowMessage(tableBody, columns, message) {
-    const row = element('tr');
-    const cell = element('td', message);
-    cell.colSpan = columns;
-    cell.className = 'empty';
-    row.append(cell);
-    tableBody.append(row);
+  function matchesOrder(order, query, filter, unfinishedOrderIds) {
+    const status = statusOf(order);
+    const searchable = [order.id, order.product, order.paper, status, order.delayReason]
+      .join(' ').toLocaleLowerCase();
+    if (query && !searchable.includes(query)) return false;
+    if (filter === 'unfinished' && (order.cancelled || !unfinishedOrderIds.has(order.id))) return false;
+    if (filter === 'approval' && status !== '製造承認待ち') return false;
+    return true;
   }
 
   function renderOrders() {
     const list = $('orders');
-    list.replaceChildren();
-    for (const order of [...state.orders.values()].reverse()) {
-      const row = element('tr');
+    const query = $('order-search').value.trim().toLocaleLowerCase();
+    const filter = $('order-filter').value;
+    const orders = [...state.orders.values()].reverse();
+    const currentOrderIds = new Set(orders.map(order => order.id));
+    for (const [orderId, row] of orderRows) {
+      if (!currentOrderIds.has(orderId)) {
+        row.remove();
+        orderRows.delete(orderId);
+      }
+    }
+    const correctionHistory = new Map();
+    const unfinishedOrderIds = new Set([...state.requests.values()]
+      .filter(request => ['order', 'additional'].includes(request.type) &&
+        request.answer !== '却下' && !request.finished)
+      .map(request => request.orderId));
+    for (const proof of state.proofs.values()) {
+      if (proof.answer !== '修正依頼') continue;
+      if (!correctionHistory.has(proof.orderId)) correctionHistory.set(proof.orderId, []);
+      correctionHistory.get(proof.orderId).push('第' + proof.version + '版: ' + (proof.comment || '—'));
+    }
+    let visibleCount = 0;
+    orders.forEach((order, index) => {
+      let row = orderRows.get(order.id);
+      if (!row) {
+        row = element('tr');
+        row.append(...Array.from({ length: 11 }, () => element('td')));
+        orderRows.set(order.id, row);
+      }
+      const corrections = (correctionHistory.get(order.id) || []).join('\n');
       const values = [order.id, order.product, order.paper, order.quantity + '部', order.dueDate,
         statusOf(order), order.proofStatus || '—', order.expectedDate || '—',
-        order.delayReason || '—', order.initialFinished || order.goodQuantity ? order.goodQuantity + '部' : '—'];
-      row.append(...values.map(value => element('td', value)));
-      list.append(row);
+        order.delayReason || '—', order.initialFinished || order.goodQuantity ? order.goodQuantity + '部' : '—',
+        corrections || '—'];
+      [...row.cells].forEach((cell, cellIndex) => { cell.textContent = values[cellIndex]; });
+      row.cells[10].className = 'revision-history';
+      row.hidden = !matchesOrder(order, query, filter, unfinishedOrderIds);
+      if (!row.hidden) visibleCount++;
+      list.insertBefore(row, list.children[index] || null);
+    });
+    if (!visibleCount) {
+      if (!orderEmptyRow) {
+        orderEmptyRow = element('tr');
+        const cell = element('td', orders.length ? '条件に一致する注文がありません。' : '注文がありません。');
+        cell.colSpan = 11;
+        cell.className = 'empty';
+        orderEmptyRow.append(cell);
+      }
+      orderEmptyRow.firstElementChild.textContent = orders.length
+        ? '条件に一致する注文がありません。' : '注文がありません。';
+      list.append(orderEmptyRow);
+    } else if (orderEmptyRow) {
+      orderEmptyRow.remove();
     }
-    if (!list.children.length) rowMessage(list, 10, '注文がありません。');
-    $('order-count').textContent = state.orders.size + '件';
+    $('order-count').textContent = visibleCount + '件 / ' + orders.length + '件';
+  }
+
+  function createHistoryRow(event) {
+    const definition = workflow.interfaces[event.type];
+    const sent = definition.from === department;
+    const row = element('tr');
+    const detail = element('details');
+    detail.append(element('summary', '内容を見る'));
+    const metadata = element('dl');
+    for (const field of definition.fields) {
+      const label = event.type === 'delay' && field === 'dueDate'
+        ? '確定納期' : fields[field]?.[0] || '更新日時';
+      metadata.append(element('dt', label), element('dd', event[field] || '—'));
+    }
+    detail.append(metadata);
+    const detailCell = element('td');
+    detailCell.append(detail);
+    const actionCell = element('td');
+    if (sent) {
+      const button = element('button', 'CSVを書き出す');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.addEventListener('click', () => eventDownload(event));
+      actionCell.append(button);
+    } else {
+      actionCell.textContent = '—';
+    }
+    row.append(element('td', sent ? '送信側' : '受信側'), element('td', definition.name),
+      element('td', event.orderId), detailCell, actionCell);
+    return row;
   }
 
   function renderHistory() {
     const list = $('history');
-    list.replaceChildren();
-    for (const event of [...events].reverse()) {
-      const definition = workflow.interfaces[event.type];
-      const sent = definition.from === department;
-      const row = element('tr');
-      const detail = element('details');
-      detail.append(element('summary', '内容を見る'));
-      const metadata = element('dl');
-      for (const field of definition.fields) {
-        metadata.append(element('dt', fields[field]?.[0] || '更新日時'), element('dd', event[field] || '—'));
+    const currentIds = new Set(events.map(event => event.eventId));
+    for (const [eventId, cached] of historyRows) {
+      if (!currentIds.has(eventId)) {
+        cached.row.remove();
+        historyRows.delete(eventId);
       }
-      detail.append(metadata);
-      const detailCell = element('td');
-      detailCell.append(detail);
-      const actionCell = element('td');
-      if (sent) {
-        const button = element('button', 'CSVを書き出す');
-        button.type = 'button';
-        button.className = 'secondary';
-        button.addEventListener('click', () => eventDownload(event));
-        actionCell.append(button);
-      } else {
-        actionCell.textContent = '—';
-      }
-      row.append(element('td', sent ? '送信側' : '受信側'), element('td', definition.name),
-        element('td', event.orderId), detailCell, actionCell);
-      list.append(row);
     }
-    if (!list.children.length) rowMessage(list, 5, 'やり取りはまだありません。');
+    const reversed = [...events].reverse();
+    reversed.forEach((event, index) => {
+      let cached = historyRows.get(event.eventId);
+      if (!cached || cached.event !== event) {
+        if (cached) cached.row.remove();
+        cached = { event, row: createHistoryRow(event) };
+        historyRows.set(event.eventId, cached);
+      }
+      list.insertBefore(cached.row, list.children[index] || null);
+    });
+    if (!reversed.length) {
+      if (!historyEmptyRow) {
+        historyEmptyRow = element('tr');
+        const cell = element('td', 'やり取りはまだありません。');
+        cell.colSpan = 5;
+        cell.className = 'empty';
+        historyEmptyRow.append(cell);
+      }
+      list.append(historyEmptyRow);
+    } else if (historyEmptyRow) {
+      historyEmptyRow.remove();
+    }
   }
 
   function refresh() {
@@ -228,6 +311,8 @@
 
   $('operation').append(...outgoing.map(([type, definition]) => option(type, definition.name)));
   $('operation').addEventListener('change', () => renderForm());
+  $('order-search').addEventListener('input', renderOrders);
+  $('order-filter').addEventListener('change', renderOrders);
 
   $('entry').addEventListener('submit', event => {
     event.preventDefault();
