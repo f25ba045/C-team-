@@ -62,14 +62,23 @@
       return orders.filter(order => [...state.requests.values()].some(request =>
         request.orderId === order.id && !request.answer));
     }
-    return orders.filter(workflow.availableOrder);
+    return orders.filter(order => workflow.availableOrder(order) &&
+      (!['change', 'cancel'].includes(type) || (!order.initialFinished &&
+        !hasPendingChangeOrCancel(order.id))) &&
+      (type !== 'finish' || !hasPendingChangeOrCancel(order.id)));
+  }
+
+  function hasPendingChangeOrCancel(orderId) {
+    return [...state.requests.values()].some(request => request.orderId === orderId &&
+      ['change', 'cancel'].includes(request.type) && !request.answer);
   }
 
   function requestChoices(type, order) {
     return [...state.requests.values()]
       .filter(request => order && request.orderId === order.id)
       .filter(request => type === 'reply' ? !request.answer :
-        ['order', 'additional'].includes(request.type) && request.answer === '承認' && !request.finished)
+        ['order', 'additional'].includes(request.type) && request.answer === '承認' && !request.finished &&
+        !hasPendingChangeOrCancel(order.id))
       .map(request => [request.requestId, workflow.interfaces[request.type].name + ' · ' +
         (type === 'finish' ? request.targetQuantity + '部 · ' : '') + request.requestId]);
   }
@@ -158,7 +167,13 @@
     const request = state.requests.get(order.originalRequestId);
     if (order.cancelled) return 'キャンセル済み';
     if (!order.approved) return request.answer === '却下' ? '製造依頼却下' : '製造承認待ち';
-    if (order.initialFinished) return order.goodQuantity < order.quantity ? '完了・不足あり' : '完了';
+    if (order.initialFinished) {
+      const additions = [...state.requests.values()].filter(item =>
+        item.orderId === order.id && item.type === 'additional');
+      if (additions.some(item => !item.answer)) return '追加製造承認待ち';
+      if (additions.some(item => item.answer === '承認' && !item.finished)) return '追加製造中';
+      return order.goodQuantity < order.quantity ? '完了・不足あり' : '完了';
+    }
     return order.progress || '製造承認済み';
   }
 
@@ -180,9 +195,29 @@
         statusOf(order), order.proofStatus || '—', order.expectedDate || '—',
         order.delayReason || '—', order.initialFinished || order.goodQuantity ? order.goodQuantity + '部' : '—'];
       row.append(...values.map(value => element('td', value)));
+      const actionCell = element('td');
+      const originalRequest = state.requests.get(order.originalRequestId);
+      if (department === 'sales' && originalRequest.answer === '却下') {
+        const button = element('button', '内容をコピーして再依頼');
+        button.type = 'button';
+        button.className = 'secondary';
+        button.addEventListener('click', () => {
+          $('operation').value = 'order';
+          renderForm();
+          for (const field of ['product', 'paper', 'quantity', 'dueDate']) {
+            $('fields').querySelector('[name="' + field + '"]').value = order[field];
+          }
+          $('fields').querySelector('[name="product"]').focus();
+          show('却下された注文の内容を入力欄にコピーしました。確認・修正して新しい注文として再依頼してください。');
+        });
+        actionCell.append(button);
+      } else {
+        actionCell.textContent = '—';
+      }
+      row.append(actionCell);
       list.append(row);
     }
-    if (!list.children.length) rowMessage(list, 10, '注文がありません。');
+    if (!list.children.length) rowMessage(list, 11, '注文がありません。');
     $('order-count').textContent = state.orders.size + '件';
   }
 
