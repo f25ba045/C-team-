@@ -5,6 +5,7 @@
   const department = document.body.dataset.department;
   const $ = id => document.getElementById(id);
   const outgoing = Object.entries(workflow.interfaces).filter(([, definition]) => definition.from === department);
+  const storageKey = 'print-workflow-' + department + '-events-v1';
   const fields = {
     orderId: ['注文ID'], requestId: ['依頼ID'], proofId: ['校正ID'],
     product: ['品名'], paper: ['用紙'], quantity: ['部数', 'number'],
@@ -18,6 +19,7 @@
   };
   let events = [];
   let state = workflow.buildState(events);
+  let browserStorageAvailable = true;
 
   function element(tag, content) {
     const item = document.createElement(tag);
@@ -44,6 +46,34 @@
   function show(message, error = false) {
     $('message').textContent = message;
     $('message').dataset.error = String(error);
+  }
+
+  function restoreEvents() {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved === null) return;
+      const restored = JSON.parse(saved);
+      if (!Array.isArray(restored)) throw new Error('保存データの形式が不正です。');
+      workflow.buildState(restored);
+      events = restored;
+    } catch (error) {
+      browserStorageAvailable = false;
+      show('ブラウザの自動保存データを読み込めませんでした。台帳CSVから復元してください。' +
+        error.message, true);
+    }
+  }
+
+  function saveEvents(nextEvents) {
+    events = nextEvents;
+    refresh();
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(events));
+      browserStorageAvailable = true;
+      return null;
+    } catch (error) {
+      browserStorageAvailable = false;
+      return error;
+    }
   }
 
   function localDate() {
@@ -275,10 +305,13 @@
     if (type === 'progress') item.updatedAt = new Date().toISOString();
 
     try {
-      events = workflow.mergeEvents(events, [item]).events;
-      refresh();
+      const result = workflow.mergeEvents(events, [item]);
+      const storageError = saveEvents(result.events);
       eventDownload(item);
-      show(workflow.interfaces[type].name + 'を登録し、CSVを書き出しました。');
+      show(workflow.interfaces[type].name + 'を登録し、CSVを書き出しました。' +
+        (result.pending ? ' 先行データ待ち ' + result.pending + ' 件。' : '') +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show(error.message, true);
     }
@@ -286,15 +319,20 @@
 
   $('incoming').addEventListener('change', async event => {
     const input = event.target;
-    const file = input.files[0];
-    if (!file) return;
+    const files = [...input.files];
+    if (!files.length) return;
     input.disabled = true;
     try {
-      const text = await file.text();
-      const result = workflow.mergeEvents(events, workflow.readExchange(text, department));
-      events = result.events;
-      refresh();
-      show(file.name + ' を取り込みました。新規 ' + result.accepted + ' 件、取り込み済み ' + result.skipped + ' 件。');
+      const incomingEvents = (await Promise.all(files.map(async file =>
+        workflow.readExchange(await file.text(), department)))).flat();
+      const result = workflow.mergeEvents(events, incomingEvents);
+      const storageError = saveEvents(result.events);
+      show(files.map(file => file.name).join('、') + ' を取り込みました。新規 ' +
+        result.accepted + ' 件、取り込み済み ' +
+        result.skipped + ' 件。' +
+        (result.pending ? ' 先行データ待ち ' + result.pending + ' 件。' : '') +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show('取り込みを中止しました。' + error.message, true);
     } finally {
@@ -315,9 +353,10 @@
     try {
       const saved = workflow.readBackup(department, await file.text());
       if (events.length && !confirm('現在の台帳を置き換えますか？')) return;
-      events = saved;
-      refresh();
-      show('保存済みの台帳を開きました。');
+      const storageError = saveEvents(saved);
+      show('保存済みの台帳を開きました。' +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show('台帳を開けませんでした。' + error.message, true);
     } finally {
@@ -331,5 +370,12 @@
       definition.name + '（' + type + '）');
     guidance.append(item);
   }
+  restoreEvents();
+  window.addEventListener('beforeunload', event => {
+    if (events.length && !browserStorageAvailable) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
   refresh();
 })();
