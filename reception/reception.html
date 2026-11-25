@@ -18,7 +18,8 @@
       <summary>使い方とCSVの種類</summary>
       <p>「製造依頼」を記入して書き出し、製造部へCSVを渡します。製造部から返る「依頼回答」CSVを取り込むと、注文の状態が変わります。</p>
       <p>校正を行う場合は、製造部の校正確認依頼と営業部の校正回答を交換します。製造部は進捗・遅延・完了を必要に応じて書き出し、営業部に渡します。</p>
-      <p>データは開いている画面で保持します。閉じる前に台帳を保存し、再開時に開き直してください。</p>
+      <p>データはブラウザに自動保存されます。自動保存に失敗した場合は、閉じる前に台帳をCSVで保存してください。保存済みの台帳CSVも、再開時に開いて復元できます。</p>
+      <p>複数種類のイベントを含むCSVに対応し、複数のCSVファイルをまとめて選択できます。先行データがまだないイベントは保留され、必要なCSVを後から取り込むと自動で反映されます。</p>
       <ul id="csv-types"></ul>
     </details>
 
@@ -38,7 +39,7 @@
         <section aria-labelledby="import-title">
           <h2 id="import-title">相手部署からのCSV</h2>
           <label>取り込むファイル
-            <input id="incoming" type="file" accept=".csv,text/csv">
+            <input id="incoming" type="file" accept=".csv,text/csv" multiple>
           </label>
         </section>
         <section aria-labelledby="backup-title">

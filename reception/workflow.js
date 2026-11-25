@@ -171,19 +171,66 @@
     }
   }
 
+  function cloneState(state) {
+    return {
+      orders: new Map([...state.orders].map(([id, value]) => [id, { ...value }])),
+      requests: new Map([...state.requests].map(([id, value]) => [id, { ...value }])),
+      proofs: new Map([...state.proofs].map(([id, value]) => [id, { ...value }]))
+    };
+  }
+
+  function hasPendingDependency(state, event) {
+    const order = state.orders.get(event.orderId);
+    const request = state.requests.get(event.requestId);
+    const proof = state.proofs.get(event.proofId);
+
+    if (event.type !== 'order' && !order) return true;
+    if (['reply', 'finish'].includes(event.type) && !request) return true;
+    if (event.type === 'proofReply' && !proof) return true;
+    if (event.type === 'finish' && ['order', 'additional'].includes(request.type) && !request.answer) {
+      return true;
+    }
+
+    const needsApprovedOrder = (requestTypes.includes(event.type) && event.type !== 'order') ||
+      ['proof', 'proofReply', 'progress', 'delay', 'finish'].includes(event.type);
+    if (needsApprovedOrder && !availableOrder(order)) {
+      const originalRequest = state.requests.get(order.originalRequestId);
+      return !order.cancelled && !order.approved && originalRequest && !originalRequest.answer;
+    }
+    return false;
+  }
+
   function eventValues(event) {
     return ['eventId', 'type', ...interfaces[event.type].fields].map(field => event[field]);
   }
 
   function buildState(events) {
-    const state = { orders: new Map(), requests: new Map(), proofs: new Map() };
+    let state = { orders: new Map(), requests: new Map(), proofs: new Map() };
     const seen = new Map();
     for (const event of events) {
       requireThat(!seen.has(event.eventId), '台帳内でイベントIDが重複しています。');
-      applyEvent(state, event);
+      validateEvent(event);
       seen.set(event.eventId, event);
     }
-    return { ...state, seen };
+
+    let pending = [...events];
+    let progressed = true;
+    while (pending.length && progressed) {
+      progressed = false;
+      const waiting = [];
+      for (const event of pending) {
+        if (hasPendingDependency(state, event)) {
+          waiting.push(event);
+          continue;
+        }
+        const nextState = cloneState(state);
+        applyEvent(nextState, event);
+        state = nextState;
+        progressed = true;
+      }
+      pending = waiting;
+    }
+    return { ...state, seen, pending };
   }
 
   function mergeEvents(current, incoming) {
@@ -200,14 +247,14 @@
           skipped++;
           continue;
         }
-        applyEvent(state, event);
-        state.seen.set(event.eventId, event);
+        buildState([...current, ...accepted, event]);
         accepted.push(event);
       } catch (error) {
         throw new Error('データ ' + (index + 1) + ' 件目：' + error.message);
       }
     }
-    return { events: [...current, ...accepted], accepted: accepted.length, skipped };
+    const merged = [...current, ...accepted];
+    return { events: merged, accepted: accepted.length, skipped, pending: buildState(merged).pending.length };
   }
 
   function encodeCsv(rows) {
@@ -270,17 +317,28 @@
   }
 
   function readExchange(text, receivingDepartment) {
-    const [header, ...rows] = decodeCsv(text);
-    requireThat(rows.length, 'CSVにデータ行がありません。');
-    const type = rows[0][1];
-    const definition = Object.hasOwn(interfaces, type) && interfaces[type];
-    requireThat(definition && definition.from !== receivingDepartment, '相手部署から受信する種類のCSVを選んでください。');
-    const expected = ['eventId', 'type', ...definition.fields];
-    requireThat(JSON.stringify(header) === JSON.stringify(expected), 'CSVの見出しが仕様と一致しません。');
-    return rows.map((row, index) => {
-      requireThat(row.length === header.length && row[1] === type, 'データ ' + (index + 1) + ' 件目の列数または種類が不正です。');
-      return Object.fromEntries(header.map((field, position) => [field, row[position]]));
-    });
+    const rows = decodeCsv(text);
+    const allFields = new Set(Object.values(interfaces).flatMap(definition => definition.fields));
+    let header = null;
+    const events = [];
+    for (const [index, row] of rows.entries()) {
+      if (row[0] === 'eventId' && row[1] === 'type') {
+        requireThat(new Set(row).size === row.length &&
+          row.every((field, position) => position < 2 || allFields.has(field)),
+        'CSVの見出しが仕様と一致しません。');
+        header = row;
+        continue;
+      }
+      requireThat(header, 'CSVの見出しが仕様と一致しません。');
+      const definition = Object.hasOwn(interfaces, row[1]) && interfaces[row[1]];
+      requireThat(definition && definition.from !== receivingDepartment,
+        'データ ' + (index + 1) + ' 件目は相手部署から受信する種類ではありません。');
+      requireThat(row.length === header.length && definition.fields.every(field => header.includes(field)),
+        'データ ' + (index + 1) + ' 件目の列数または見出しが不正です。');
+      events.push(Object.fromEntries(header.map((field, position) => [field, row[position]])));
+    }
+    requireThat(events.length, 'CSVにデータ行がありません。');
+    return events;
   }
 
   function exportBackup(department, events) {
