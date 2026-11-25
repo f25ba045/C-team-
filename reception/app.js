@@ -5,6 +5,7 @@
   const department = document.body.dataset.department;
   const $ = id => document.getElementById(id);
   const outgoing = Object.entries(workflow.interfaces).filter(([, definition]) => definition.from === department);
+  const storageKey = 'print-workflow-' + department + '-events-v1';
   const fields = {
     orderId: ['注文ID'], requestId: ['依頼ID'], proofId: ['校正ID'],
     product: ['品名'], paper: ['用紙'], quantity: ['部数', 'number'],
@@ -18,10 +19,7 @@
   };
   let events = [];
   let state = workflow.buildState(events);
-  const orderRows = new Map();
-  const historyRows = new Map();
-  let orderEmptyRow;
-  let historyEmptyRow;
+  let browserStorageAvailable = true;
 
   function element(tag, content) {
     const item = document.createElement(tag);
@@ -50,6 +48,34 @@
     $('message').dataset.error = String(error);
   }
 
+  function restoreEvents() {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved === null) return;
+      const restored = JSON.parse(saved);
+      if (!Array.isArray(restored)) throw new Error('保存データの形式が不正です。');
+      workflow.buildState(restored);
+      events = restored;
+    } catch (error) {
+      browserStorageAvailable = false;
+      show('ブラウザの自動保存データを読み込めませんでした。台帳CSVから復元してください。' +
+        error.message, true);
+    }
+  }
+
+  function saveEvents(nextEvents) {
+    events = nextEvents;
+    refresh();
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(events));
+      browserStorageAvailable = true;
+      return null;
+    } catch (error) {
+      browserStorageAvailable = false;
+      return error;
+    }
+  }
+
   function localDate() {
     const now = new Date();
     return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -66,14 +92,23 @@
       return orders.filter(order => [...state.requests.values()].some(request =>
         request.orderId === order.id && !request.answer));
     }
-    return orders.filter(workflow.availableOrder);
+    return orders.filter(order => workflow.availableOrder(order) &&
+      (!['change', 'cancel'].includes(type) || (!order.initialFinished &&
+        !hasPendingChangeOrCancel(order.id))) &&
+      (type !== 'finish' || !hasPendingChangeOrCancel(order.id)));
+  }
+
+  function hasPendingChangeOrCancel(orderId) {
+    return [...state.requests.values()].some(request => request.orderId === orderId &&
+      ['change', 'cancel'].includes(request.type) && !request.answer);
   }
 
   function requestChoices(type, order) {
     return [...state.requests.values()]
       .filter(request => order && request.orderId === order.id)
       .filter(request => type === 'reply' ? !request.answer :
-        ['order', 'additional'].includes(request.type) && request.answer === '承認' && !request.finished)
+        ['order', 'additional'].includes(request.type) && request.answer === '承認' && !request.finished &&
+        !hasPendingChangeOrCancel(order.id))
       .map(request => [request.requestId, workflow.interfaces[request.type].name + ' · ' +
         (type === 'finish' ? request.targetQuantity + '部 · ' : '') + request.requestId]);
   }
@@ -167,7 +202,13 @@
     const request = state.requests.get(order.originalRequestId);
     if (order.cancelled) return 'キャンセル済み';
     if (!order.approved) return request.answer === '却下' ? '製造依頼却下' : '製造承認待ち';
-    if (order.initialFinished) return order.goodQuantity < order.quantity ? '完了・不足あり' : '完了';
+    if (order.initialFinished) {
+      const additions = [...state.requests.values()].filter(item =>
+        item.orderId === order.id && item.type === 'additional');
+      if (additions.some(item => !item.answer)) return '追加製造承認待ち';
+      if (additions.some(item => item.answer === '承認' && !item.finished)) return '追加製造中';
+      return order.goodQuantity < order.quantity ? '完了・不足あり' : '完了';
+    }
     return order.progress || '製造承認済み';
   }
 
@@ -214,59 +255,32 @@
       const corrections = (correctionHistory.get(order.id) || []).join('\n');
       const values = [order.id, order.product, order.paper, order.quantity + '部', order.dueDate,
         statusOf(order), order.proofStatus || '—', order.expectedDate || '—',
-        order.delayReason || '—', order.initialFinished || order.goodQuantity ? order.goodQuantity + '部' : '—',
-        corrections || '—'];
-      [...row.cells].forEach((cell, cellIndex) => { cell.textContent = values[cellIndex]; });
-      row.cells[10].className = 'revision-history';
-      row.hidden = !matchesOrder(order, query, filter, unfinishedOrderIds);
-      if (!row.hidden) visibleCount++;
-      list.insertBefore(row, list.children[index] || null);
-    });
-    if (!visibleCount) {
-      if (!orderEmptyRow) {
-        orderEmptyRow = element('tr');
-        const cell = element('td', orders.length ? '条件に一致する注文がありません。' : '注文がありません。');
-        cell.colSpan = 11;
-        cell.className = 'empty';
-        orderEmptyRow.append(cell);
+        order.delayReason || '—', order.initialFinished || order.goodQuantity ? order.goodQuantity + '部' : '—'];
+      row.append(...values.map(value => element('td', value)));
+      const actionCell = element('td');
+      const originalRequest = state.requests.get(order.originalRequestId);
+      if (department === 'sales' && originalRequest.answer === '却下') {
+        const button = element('button', '内容をコピーして再依頼');
+        button.type = 'button';
+        button.className = 'secondary';
+        button.addEventListener('click', () => {
+          $('operation').value = 'order';
+          renderForm();
+          for (const field of ['product', 'paper', 'quantity', 'dueDate']) {
+            $('fields').querySelector('[name="' + field + '"]').value = order[field];
+          }
+          $('fields').querySelector('[name="product"]').focus();
+          show('却下された注文の内容を入力欄にコピーしました。確認・修正して新しい注文として再依頼してください。');
+        });
+        actionCell.append(button);
+      } else {
+        actionCell.textContent = '—';
       }
-      orderEmptyRow.firstElementChild.textContent = orders.length
-        ? '条件に一致する注文がありません。' : '注文がありません。';
-      list.append(orderEmptyRow);
-    } else if (orderEmptyRow) {
-      orderEmptyRow.remove();
+      row.append(actionCell);
+      list.append(row);
     }
-    $('order-count').textContent = visibleCount + '件 / ' + orders.length + '件';
-  }
-
-  function createHistoryRow(event) {
-    const definition = workflow.interfaces[event.type];
-    const sent = definition.from === department;
-    const row = element('tr');
-    const detail = element('details');
-    detail.append(element('summary', '内容を見る'));
-    const metadata = element('dl');
-    for (const field of definition.fields) {
-      const label = event.type === 'delay' && field === 'dueDate'
-        ? '確定納期' : fields[field]?.[0] || '更新日時';
-      metadata.append(element('dt', label), element('dd', event[field] || '—'));
-    }
-    detail.append(metadata);
-    const detailCell = element('td');
-    detailCell.append(detail);
-    const actionCell = element('td');
-    if (sent) {
-      const button = element('button', 'CSVを書き出す');
-      button.type = 'button';
-      button.className = 'secondary';
-      button.addEventListener('click', () => eventDownload(event));
-      actionCell.append(button);
-    } else {
-      actionCell.textContent = '—';
-    }
-    row.append(element('td', sent ? '送信側' : '受信側'), element('td', definition.name),
-      element('td', event.orderId), detailCell, actionCell);
-    return row;
+    if (!list.children.length) rowMessage(list, 11, '注文がありません。');
+    $('order-count').textContent = state.orders.size + '件';
   }
 
   function renderHistory() {
@@ -325,10 +339,13 @@
     if (type === 'progress') item.updatedAt = new Date().toISOString();
 
     try {
-      events = workflow.mergeEvents(events, [item]).events;
-      refresh();
+      const result = workflow.mergeEvents(events, [item]);
+      const storageError = saveEvents(result.events);
       eventDownload(item);
-      show(workflow.interfaces[type].name + 'を登録し、CSVを書き出しました。');
+      show(workflow.interfaces[type].name + 'を登録し、CSVを書き出しました。' +
+        (result.pending ? ' 先行データ待ち ' + result.pending + ' 件。' : '') +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show(error.message, true);
     }
@@ -336,15 +353,20 @@
 
   $('incoming').addEventListener('change', async event => {
     const input = event.target;
-    const file = input.files[0];
-    if (!file) return;
+    const files = [...input.files];
+    if (!files.length) return;
     input.disabled = true;
     try {
-      const text = await file.text();
-      const result = workflow.mergeEvents(events, workflow.readExchange(text, department));
-      events = result.events;
-      refresh();
-      show(file.name + ' を取り込みました。新規 ' + result.accepted + ' 件、取り込み済み ' + result.skipped + ' 件。');
+      const incomingEvents = (await Promise.all(files.map(async file =>
+        workflow.readExchange(await file.text(), department)))).flat();
+      const result = workflow.mergeEvents(events, incomingEvents);
+      const storageError = saveEvents(result.events);
+      show(files.map(file => file.name).join('、') + ' を取り込みました。新規 ' +
+        result.accepted + ' 件、取り込み済み ' +
+        result.skipped + ' 件。' +
+        (result.pending ? ' 先行データ待ち ' + result.pending + ' 件。' : '') +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show('取り込みを中止しました。' + error.message, true);
     } finally {
@@ -365,9 +387,10 @@
     try {
       const saved = workflow.readBackup(department, await file.text());
       if (events.length && !confirm('現在の台帳を置き換えますか？')) return;
-      events = saved;
-      refresh();
-      show('保存済みの台帳を開きました。');
+      const storageError = saveEvents(saved);
+      show('保存済みの台帳を開きました。' +
+        (storageError ? ' 自動保存に失敗しました。台帳CSVを保存してください。' : ''),
+      Boolean(storageError));
     } catch (error) {
       show('台帳を開けませんでした。' + error.message, true);
     } finally {
@@ -381,5 +404,12 @@
       definition.name + '（' + type + '）');
     guidance.append(item);
   }
+  restoreEvents();
+  window.addEventListener('beforeunload', event => {
+    if (events.length && !browserStorageAvailable) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
   refresh();
 })();
